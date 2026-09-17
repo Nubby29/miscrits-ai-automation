@@ -5,21 +5,22 @@ from __future__ import annotations
 from .regions import NormalizedRegion
 
 
-# Coordinates are relative to the captured Miscrits client window.
-# The game HUD is stable enough that these small text crops are more reliable
-# than OCR'ing the entire battle screen.
-BATTLE_PLAYER_NAME = NormalizedRegion("player_name", 0.285, 0.035, 0.125, 0.040)
-BATTLE_PLAYER_HP = NormalizedRegion("player_hp", 0.355, 0.067, 0.085, 0.040)
-BATTLE_ENEMY_NAME = NormalizedRegion("enemy_name", 0.615, 0.035, 0.110, 0.040)
-BATTLE_ENEMY_HP = NormalizedRegion("enemy_hp", 0.685, 0.067, 0.080, 0.040)
-BATTLE_CAPTURE_TEXT = NormalizedRegion("capture_text", 0.445, 0.105, 0.115, 0.075)
-BATTLE_TURN_REGION = NormalizedRegion("turn_text", 0.445, 0.805, 0.180, 0.060)
+# Coordinates are relative to the full native-captured Miscrits window.
+# The native capture includes the small window title bar, so these are calibrated
+# against the actual 1382x736 capture rather than a cropped game-only image.
+BATTLE_PLAYER_NAME = NormalizedRegion("player_name", 0.285, 0.045, 0.090, 0.045)
+BATTLE_PLAYER_HP = NormalizedRegion("player_hp", 0.345, 0.095, 0.060, 0.040)
+BATTLE_ENEMY_NAME = NormalizedRegion("enemy_name", 0.615, 0.045, 0.110, 0.045)
+BATTLE_ENEMY_HP = NormalizedRegion("enemy_hp", 0.745, 0.095, 0.060, 0.040)
+BATTLE_CAPTURE_TEXT = NormalizedRegion("capture_text", 0.455, 0.135, 0.110, 0.075)
+BATTLE_TURN_REGION = NormalizedRegion("turn_text", 0.445, 0.795, 0.190, 0.075)
 
-# Text-only portions of the four standard action buttons. The first button is
-# wider in the game's layout, so its crop starts farther left.
+# Text-only portions of the four standard action buttons. Each crop is kept
+# close to the visible label so neighboring button text cannot contaminate the
+# slot result. Slot order is preserved for later state/strategy work.
 BATTLE_ABILITY_REGIONS = (
-    NormalizedRegion("ability_1", 0.270, 0.835, 0.145, 0.075),
-    NormalizedRegion("ability_2", 0.405, 0.835, 0.135, 0.075),
-    NormalizedRegion("ability_3", 0.535, 0.835, 0.135, 0.075),
-    NormalizedRegion("ability_4", 0.665, 0.835, 0.120, 0.075),
+    NormalizedRegion("ability_1", 0.285, 0.870, 0.075, 0.060),
+    NormalizedRegion("ability_2", 0.415, 0.870, 0.085, 0.060),
+    NormalizedRegion("ability_3", 0.550, 0.870, 0.065, 0.060),
+    NormalizedRegion("ability_4", 0.670, 0.870, 0.085, 0.060),
 )
