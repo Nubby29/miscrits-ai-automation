@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover - dependency is installed at runtime.
     keyboard = None
     mouse = None
 
-from ..core.models import Region
+from .models import Region
 
 
 @dataclass
@@ -61,8 +61,9 @@ class InputController:
             key = payload.get("key")
             if not isinstance(key, str) or len(key) != 1:
                 return False
-            keyboard.Controller().press(key)
-            keyboard.Controller().release(key)
+            controller = keyboard.Controller()
+            controller.press(key)
+            controller.release(key)
             time.sleep(max(0.0, self.click_pause_seconds))
             return True
 
