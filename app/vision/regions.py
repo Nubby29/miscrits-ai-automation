@@ -1,4 +1,4 @@
-"""Normalized, resolution-independent regions for game-screen analysis."""
+"""Normalized, resolution-independent regions for Miscrits screen analysis."""
 
 from __future__ import annotations
 
@@ -23,30 +23,28 @@ class NormalizedRegion:
         top = round(self.y * image_height)
         right = round((self.x + self.width) * image_width)
         bottom = round((self.y + self.height) * image_height)
-        return (
-            max(0, left),
-            max(0, top),
-            min(image_width, right),
-            min(image_height, bottom),
-        )
+        return max(0, left), max(0, top), min(image_width, right), min(image_height, bottom)
 
-    def detect(self, image: Image.Image) -> DetectedRegion:
+    def detect(self, image: Image.Image, confidence: float = 1.0) -> DetectedRegion:
         left, top, right, bottom = self.crop_box(image)
-        return DetectedRegion(
-            name=self.name,
-            left=left,
-            top=top,
-            width=max(0, right - left),
-            height=max(0, bottom - top),
-        )
+        return DetectedRegion(self.name, left, top, max(0, right - left), max(0, bottom - top), confidence)
 
 
-# Initial exploration layout regions. These are intentionally broad and can be
-# tuned after additional real-game screenshots are collected.
-EXPLORATION_REGIONS: tuple[NormalizedRegion, ...] = (
-    NormalizedRegion("top_bar", 0.25, 0.0, 0.55, 0.14),
-    NormalizedRegion("left_menu", 0.0, 0.16, 0.18, 0.62),
-    NormalizedRegion("world_area", 0.18, 0.14, 0.82, 0.73),
-    NormalizedRegion("party_bar", 0.18, 0.84, 0.58, 0.16),
-    NormalizedRegion("bottom_actions", 0.76, 0.84, 0.24, 0.16),
+# Coordinates are normalized against the captured Miscrits client window.
+# They are layout anchors, not assumptions about a particular resolution.
+EXPLORATION_REGIONS = (
+    NormalizedRegion("top_bar", 0.20, 0.00, 0.68, 0.15),
+    NormalizedRegion("left_menu", 0.00, 0.16, 0.20, 0.60),
+    NormalizedRegion("world_area", 0.18, 0.14, 0.82, 0.72),
+    NormalizedRegion("party_bar", 0.18, 0.83, 0.57, 0.17),
+    NormalizedRegion("bottom_actions", 0.75, 0.83, 0.25, 0.17),
+)
+
+BATTLE_REGIONS = (
+    NormalizedRegion("player_status", 0.20, 0.02, 0.28, 0.14),
+    NormalizedRegion("enemy_status", 0.58, 0.02, 0.25, 0.14),
+    NormalizedRegion("battle_field", 0.12, 0.14, 0.76, 0.61),
+    NormalizedRegion("capture_status", 0.40, 0.08, 0.20, 0.16),
+    NormalizedRegion("party_switcher", 0.15, 0.30, 0.18, 0.42),
+    NormalizedRegion("battle_actions", 0.34, 0.76, 0.38, 0.22),
 )
