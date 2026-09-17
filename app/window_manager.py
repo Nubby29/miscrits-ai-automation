@@ -13,6 +13,7 @@ from .core.models import Region
 class GameWindow:
     title: str
     region: Region
+    hwnd: int | None = None
 
 
 def list_windows() -> list[GameWindow]:
@@ -22,9 +23,11 @@ def list_windows() -> list[GameWindow]:
         title = (window.title or "").strip()
         if not title or window.width <= 0 or window.height <= 0:
             continue
+        hwnd = getattr(window, "_hWnd", None)
         result.append(
             GameWindow(
                 title=title,
+                hwnd=int(hwnd) if hwnd is not None else None,
                 region=Region(
                     left=int(window.left),
                     top=int(window.top),
@@ -47,7 +50,8 @@ def find_window(title_contains: str) -> GameWindow | None:
 def activate_window(window: GameWindow) -> bool:
     """Bring a selected window to the foreground."""
     for candidate in gw.getAllWindows():
-        if candidate.title == window.title:
+        candidate_hwnd = getattr(candidate, "_hWnd", None)
+        if (window.hwnd is not None and candidate_hwnd == window.hwnd) or candidate.title == window.title:
             try:
                 if candidate.isMinimized:
                     candidate.restore()
