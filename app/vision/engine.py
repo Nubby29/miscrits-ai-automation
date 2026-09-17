@@ -82,15 +82,16 @@ class VisionEngine:
 
     @staticmethod
     def _classify_screen(ocr_text: list[str]) -> str:
-        normalized = {text.casefold().strip() for text in ocr_text}
-        if {"get miscrits", "campaign", "global boss"} & normalized:
-            return "exploration"
-        if {"attack", "skills", "switch", "flee"} & normalized:
-            return "battle"
-        if {"inventory", "items", "equipment"} & normalized:
-            return "inventory"
-        if {"train", "my miscrits"} & normalized:
-            return "menu"
+        joined = " ".join(ocr_text).casefold()
+        signatures = {
+            "exploration": ("get miscrits", "campaign", "global boss", "daily quests", "clans"),
+            "battle": ("attack", "skills", "switch", "flee"),
+            "inventory": ("inventory", "items", "equipment"),
+            "menu": ("train", "my miscrits"),
+        }
+        for screen, words in signatures.items():
+            if any(word in joined for word in words):
+                return screen
         return "unknown"
 
     @staticmethod
