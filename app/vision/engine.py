@@ -36,8 +36,8 @@ class VisionConfig:
     sharpen: bool = True
     enable_ocr: bool = True
     ocr_min_confidence: float = 35.0
-    battle_ocr_scale: int = 4
-    battle_ocr_cache_size: int = 128
+    battle_ocr_scale: int = 5
+    battle_ocr_cache_size: int = 256
     battle_layout_threshold: float = 0.50
 
 
@@ -75,8 +75,10 @@ class VisionEngine:
             screen_type, screen_confidence, evidence = self._classify_non_battle(processed)
 
         if screen_type == "battle":
-            ocr_items = self._battle_ocr_items(processed)
-            battle = self._battle_observation(processed, ocr_items)
+            # Keep the original-color frame for regional OCR. The tiny HUD text
+            # has colored outlines/shadows that can be lost by global grayscale.
+            ocr_items = self._battle_ocr_items(image)
+            battle = self._battle_observation(image, ocr_items)
         else:
             ocr_items = self._ocr(processed)
             battle = None
@@ -175,18 +177,36 @@ class VisionEngine:
         return score, {"action_brightness": round(ab, 3), "status_brightness": round(status, 3), "action_mean": round(am, 1), "field_mean": round(fm, 1)}
 
     def _battle_ocr_items(self, image: Image.Image) -> list[OCRItem]:
+        """Run several small, specialized OCR passes instead of one generic pass."""
         specs = (
-            (BATTLE_PLAYER_NAME, "name", 7, None), (BATTLE_PLAYER_HP, "hp", 7, "0123456789/"),
-            (BATTLE_ENEMY_NAME, "name", 7, None), (BATTLE_ENEMY_HP, "hp", 7, "0123456789/"),
-            (BATTLE_CAPTURE_TEXT, "capture", 7, "Capture!%0123456789"), (BATTLE_TURN_REGION, "turn", 7, None),
+            (BATTLE_PLAYER_NAME, "name"),
+            (BATTLE_PLAYER_HP, "hp"),
+            (BATTLE_ENEMY_NAME, "name"),
+            (BATTLE_ENEMY_HP, "hp"),
+            (BATTLE_CAPTURE_TEXT, "capture"),
+            (BATTLE_TURN_REGION, "turn"),
         )
         result: list[OCRItem] = []
-        for region, _, psm, whitelist in specs:
-            for text in self._regional_ocr(image, region, psm=psm, whitelist=whitelist):
-                result.append(self._make_item(image, region, text))
+        for region, kind in specs:
+            if kind == "name":
+                passes = ((7, None), (8, None), (13, None))
+            elif kind == "hp":
+                passes = ((7, "0123456789/"), (8, "0123456789/"), (13, "0123456789/"))
+            elif kind == "capture":
+                passes = ((7, "Capture%0123456789"), (8, "Capture%0123456789"), (13, "0123456789%"))
+            else:
+                passes = ((7, None), (8, None), (13, None))
+            for psm, whitelist in passes:
+                texts = self._regional_ocr(image, region, psm=psm, whitelist=whitelist)
+                for text in texts:
+                    result.append(self._make_item(image, region, text))
+                # For each semantic region, keep collecting independent OCR
+                # evidence. The parser below chooses valid candidates.
+
         for region in BATTLE_ABILITY_REGIONS:
-            for text in self._regional_ocr(image, region, psm=7, whitelist=None):
-                result.append(self._make_item(image, region, text))
+            for psm, whitelist in ((7, None), (8, None), (13, None)):
+                for text in self._regional_ocr(image, region, psm=psm, whitelist=whitelist):
+                    result.append(self._make_item(image, region, text))
         return result
 
     @staticmethod
@@ -201,28 +221,45 @@ class VisionEngine:
 
         player_names = values(BATTLE_PLAYER_NAME)
         enemy_names = values(BATTLE_ENEMY_NAME)
-        player_hp = self._find_hp(values(BATTLE_PLAYER_HP))
-        enemy_hp = self._find_hp(values(BATTLE_ENEMY_HP))
-        capture_text = " ".join(values(BATTLE_CAPTURE_TEXT))
-        turn_text = " ".join(values(BATTLE_TURN_REGION))
+        player_hp_values = values(BATTLE_PLAYER_HP)
+        enemy_hp_values = values(BATTLE_ENEMY_HP)
+        player_hp = self._find_hp(player_hp_values)
+        enemy_hp = self._find_hp(enemy_hp_values)
+        capture_values = values(BATTLE_CAPTURE_TEXT)
+        turn_values = values(BATTLE_TURN_REGION)
         ability_text = [text for region in BATTLE_ABILITY_REGIONS for text in values(region)]
 
-        player_name = self._find_name(player_names) or self._fallback_name(items, image, True)
-        enemy_name = self._find_name(enemy_names) or self._fallback_name(items, image, False)
+        player_name = self._best_name(player_names)
+        enemy_name = self._best_name(enemy_names)
         player_current, player_max = self._parse_hp(player_hp)
         enemy_current, enemy_max = self._parse_hp(enemy_hp)
+        turn_text = self._normalize(" ".join(turn_values))
         all_text = self._normalize(" ".join(i.text for i in items))
-        turn = "player" if re.search(r"it'?s your turn|your turn", self._normalize(turn_text) + " " + all_text) else None
-        capture = self._parse_percent(capture_text) or self._parse_percent(all_text)
+        turn = "player" if re.search(r"it'?s\s+your\s+turn|your\s+turn", turn_text + " " + all_text) else None
+        capture = self._parse_percent(" ".join(capture_values)) or self._parse_percent(all_text)
         abilities = self._extract_abilities(ability_text)
         return BattleObservation(
-            player_name=player_name, enemy_name=enemy_name,
-            player_hp_text=player_hp, enemy_hp_text=enemy_hp,
-            player_hp_current=player_current, player_hp_max=player_max,
-            enemy_hp_current=enemy_current, enemy_hp_max=enemy_max,
-            turn=turn, capture_percent=capture, abilities=abilities,
+            player_name=player_name,
+            enemy_name=enemy_name,
+            player_hp_text=player_hp,
+            enemy_hp_text=enemy_hp,
+            player_hp_current=player_current,
+            player_hp_max=player_max,
+            enemy_hp_current=enemy_current,
+            enemy_hp_max=enemy_max,
+            turn=turn,
+            capture_percent=capture,
+            abilities=abilities,
             status_text=tuple(dict.fromkeys(player_names + enemy_names)),
-            diagnostics={"player_name_ocr": tuple(player_names), "enemy_name_ocr": tuple(enemy_names), "player_hp_ocr": tuple(values(BATTLE_PLAYER_HP)), "enemy_hp_ocr": tuple(values(BATTLE_ENEMY_HP)), "capture_ocr": tuple(values(BATTLE_CAPTURE_TEXT)), "turn_ocr": tuple(values(BATTLE_TURN_REGION)), "ability_ocr": tuple(ability_text)},
+            diagnostics={
+                "player_name_ocr": tuple(dict.fromkeys(player_names)),
+                "enemy_name_ocr": tuple(dict.fromkeys(enemy_names)),
+                "player_hp_ocr": tuple(dict.fromkeys(player_hp_values)),
+                "enemy_hp_ocr": tuple(dict.fromkeys(enemy_hp_values)),
+                "capture_ocr": tuple(dict.fromkeys(capture_values)),
+                "turn_ocr": tuple(dict.fromkeys(turn_values)),
+                "ability_ocr": tuple(dict.fromkeys(ability_text)),
+            },
         )
 
     def _regional_ocr(self, image: Image.Image, region, *, psm: int, whitelist: str | None) -> list[str]:
@@ -232,9 +269,18 @@ class VisionEngine:
         if right <= left or bottom <= top:
             return []
         base = image.crop((left, top, right, bottom)).convert("L")
-        enlarged = base.resize((base.width * self.config.battle_ocr_scale, base.height * self.config.battle_ocr_scale), Image.Resampling.LANCZOS)
-        sharp = ImageEnhance.Sharpness(ImageEnhance.Contrast(enlarged).enhance(1.8)).enhance(2.0)
-        variants = (("sharp", sharp), ("threshold", sharp.point(lambda p: 255 if p >= 150 else 0)))
+        scale = max(3, self.config.battle_ocr_scale)
+        enlarged = base.resize((base.width * scale, base.height * scale), Image.Resampling.LANCZOS)
+        contrast = ImageEnhance.Contrast(enlarged).enhance(2.2)
+        sharp = ImageEnhance.Sharpness(contrast).enhance(2.5)
+        threshold = sharp.point(lambda p: 255 if p >= 155 else 0)
+        high_threshold = sharp.point(lambda p: 255 if p >= 185 else 0)
+        variants = (
+            ("sharp", sharp),
+            ("threshold", threshold),
+            ("high_threshold", high_threshold),
+        )
+        found: list[str] = []
         for variant_name, variant in variants:
             key = (region.name, hashlib.sha1(variant.tobytes()).hexdigest(), psm, whitelist or "", variant_name)
             if key in self._ocr_cache:
@@ -252,16 +298,30 @@ class VisionEngine:
                 if len(self._ocr_cache) >= self.config.battle_ocr_cache_size:
                     self._ocr_cache.pop(next(iter(self._ocr_cache)))
                 self._ocr_cache[key] = tuple(result)
-            if result:
-                return list(dict.fromkeys(result))
-        return []
+            found.extend(result)
+            # A single region can produce useful alternatives from different
+            # preprocessing passes; don't stop after the first noisy result.
+        return list(dict.fromkeys(found))
 
     @staticmethod
     def _find_hp(values: list[str]) -> str | None:
         for value in values:
-            match = re.search(r"(\d{1,4})\s*[/\\|]\s*(\d{1,4})", value)
+            normalized = value.replace("\\", "/").replace("|", "/").replace("I", "1").replace("l", "1")
+            match = re.search(r"(\d{1,4})\s*/\s*(\d{1,4})", normalized)
             if match:
-                return f"{match.group(1)}/{match.group(2)}"
+                current, maximum = map(int, match.groups())
+                if maximum > 0 and current <= maximum:
+                    return f"{current}/{maximum}"
+
+        # Some tiny HUD renders lose the slash entirely. In an HP-only crop,
+        # two plausible numbers are still useful evidence.
+        numbers: list[int] = []
+        for value in values:
+            numbers.extend(int(n) for n in re.findall(r"\d{1,4}", value))
+        if len(numbers) >= 2:
+            for current, maximum in zip(numbers, numbers[1:]):
+                if maximum > 0 and current <= maximum and maximum <= 9999:
+                    return f"{current}/{maximum}"
         return None
 
     @staticmethod
@@ -277,43 +337,55 @@ class VisionEngine:
     @staticmethod
     def _parse_percent(text: str) -> int | None:
         matches = re.findall(r"(?:capture!?\s*)?(\d{1,3})\s*%", text.casefold())
-        if not matches:
-            return None
-        value = int(matches[-1])
-        return value if value <= 100 else None
+        if matches:
+            value = int(matches[-1])
+            return value if value <= 100 else None
+
+        # The percentage sign is often too small for OCR. For the dedicated
+        # capture crop, accept a standalone 1–3 digit value in 0..100.
+        numbers = [int(n) for n in re.findall(r"\b\d{1,3}\b", text)]
+        for value in reversed(numbers):
+            if 0 <= value <= 100:
+                return value
+        return None
 
     @classmethod
-    def _find_name(cls, values: list[str]) -> str | None:
-        candidates = []
+    def _best_name(cls, values: list[str]) -> str | None:
+        candidates: list[str] = []
         for value in values:
             cleaned = re.sub(r"[^A-Za-z0-9' -]", "", value).strip()
+            cleaned = re.sub(r"\s+", " ", cleaned)
             if cls._looks_like_name(cleaned):
                 candidates.append(cleaned)
-        return max(candidates, key=len) if candidates else None
+        if not candidates:
+            return None
+        # Prefer longer alphabetic candidates; tiny OCR fragments such as
+        # "ee" are usually noise compared with a full HUD name.
+        return max(candidates, key=lambda text: (sum(c.isalpha() for c in text), len(text)))
 
     @classmethod
     def _looks_like_name(cls, value: str) -> bool:
-        return 3 <= len(value) <= 20 and not any(c.isdigit() for c in value) and value.casefold() not in cls._IGNORED_NAME_TEXT and any(c.isalpha() for c in value)
-
-    @classmethod
-    def _fallback_name(cls, items: list[OCRItem], image: Image.Image, left_side: bool) -> str | None:
-        cutoff = image.width * .50
-        candidates = [i.text.strip() for i in items if i.top < image.height * .16 and ((i.left < cutoff) if left_side else (i.left >= cutoff)) and cls._looks_like_name(i.text.strip())]
-        return max(candidates, key=len) if candidates else None
+        return (
+            3 <= len(value) <= 20
+            and not any(c.isdigit() for c in value)
+            and value.casefold() not in cls._IGNORED_NAME_TEXT
+            and any(c.isalpha() for c in value)
+        )
 
     @classmethod
     def _extract_abilities(cls, values: list[str]) -> tuple[str, ...]:
         found: list[str] = []
         for value in values:
             text = cls._normalize(value)
+            words = [word for word in text.split() if word]
             for expected in cls._ABILITY_NAMES:
-                if expected in text or SequenceMatcher(None, text, expected).ratio() >= .64:
-                    label = expected.title() if expected != "power up" and expected != "shy smile" else expected.title()
+                expected_words = expected.split()
+                if expected in text or SequenceMatcher(None, text, expected).ratio() >= .60:
+                    label = expected.title()
                     if label not in found:
                         found.append(label)
                     continue
-                words = text.split()
-                if any(SequenceMatcher(None, word, expected).ratio() >= .72 for word in words if len(word) >= 4):
+                if any(SequenceMatcher(None, word, expected_word).ratio() >= .66 for word in words for expected_word in expected_words if len(expected_word) >= 4):
                     label = expected.title()
                     if label not in found:
                         found.append(label)
