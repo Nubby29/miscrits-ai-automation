@@ -205,10 +205,6 @@ class DesktopDashboard:
             details.append(f"Player: {battle.player_name}")
         if battle.enemy_name:
             details.append(f"Enemy: {battle.enemy_name}")
-        if battle.player_hp_text:
-            details.append(f"HP: {battle.player_hp_text}")
-        if battle.enemy_hp_text:
-            details.append(f"Enemy HP: {battle.enemy_hp_text}")
         if battle.player_hp_current is not None and battle.player_hp_max is not None:
             details.append(f"Player HP: {battle.player_hp_current}/{battle.player_hp_max}")
         if battle.enemy_hp_current is not None and battle.enemy_hp_max is not None:
@@ -217,11 +213,14 @@ class DesktopDashboard:
             details.append(f"Turn: {battle.turn}")
         if battle.capture_percent is not None:
             details.append(f"Capture: {battle.capture_percent}%")
-        if battle.abilities:
+        if battle.ability_slots:
+            slots = " | ".join(f"{i + 1}:{name or '—'}" for i, name in enumerate(battle.ability_slots))
+            details.append("Abilities: " + slots)
+        elif battle.abilities:
             details.append("Abilities: " + ", ".join(battle.abilities))
 
-        # Visual HP analysis is deliberately diagnostic. We do not replace the
-        # numeric OCR result until fixture measurements demonstrate stability.
+        # Visual HP analysis is diagnostic only. Numeric OCR remains the
+        # authoritative HP value until fixture measurements prove otherwise.
         if self.latest_frame is not None:
             try:
                 bars = estimate_battle_hp_bars(self.latest_frame.to_image())
