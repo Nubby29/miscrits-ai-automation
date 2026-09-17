@@ -15,10 +15,11 @@ from .window_manager import GameWindow, activate_window, list_windows
 
 class DesktopDashboard:
     REFRESH_MS = 250
+    SELF_TITLE = "Miscrits AI Automation — Vision Console"
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Miscrits AI Automation — Vision Console")
+        self.root.title(self.SELF_TITLE)
         self.root.geometry("1100x760")
         self.root.minsize(900, 650)
         self.capture = ScreenCapture()
@@ -60,18 +61,23 @@ class DesktopDashboard:
         ttk.Label(vision_bar, textvariable=self.vision_var).pack(side="left")
 
     def refresh_windows(self) -> None:
-        self.windows = list_windows()
+        """Refresh windows while excluding this dashboard from capture targets."""
+        previous_title = self.selected.title if self.selected else None
+        all_windows = list_windows()
+        self.windows = [w for w in all_windows if w.title != self.SELF_TITLE]
         labels = [f"{w.title}  [{w.region.width}×{w.region.height}]" for w in self.windows]
         self.window_combo["values"] = labels
+
         if labels:
-            self.window_combo.current(0)
+            index = next((i for i, w in enumerate(self.windows) if w.title == previous_title), 0)
+            self.window_combo.current(index)
             self._select_window()
-            self.status_var.set(f"Found {len(labels)} visible windows")
+            self.status_var.set(f"Found {len(labels)} capture targets")
         else:
             self.window_combo.set("")
             self.selected = None
-            self.title_var.set("No usable window found")
-            self.status_var.set("No windows detected")
+            self.title_var.set("No capture target found")
+            self.status_var.set("No capture targets detected")
 
     def _select_window(self, _event: object | None = None) -> None:
         index = self.window_combo.current()
