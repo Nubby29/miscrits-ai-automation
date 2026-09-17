@@ -11,7 +11,9 @@ from PIL import Image, ImageDraw, ImageTk
 from .capture import Frame, ScreenCapture
 from .vision.engine import VisionEngine
 from .vision.fixtures import save_frame
+from .vision.hp_analysis import estimate_battle_hp_bars
 from .vision.models import VisionResult
+from .vision.temporal import VisionStabilityTracker
 from .vision.worker import VisionWorker
 from .window_manager import GameWindow, activate_window, list_windows
 
@@ -28,6 +30,7 @@ class DesktopDashboard:
         self.root.minsize(900, 740)
         self.capture = ScreenCapture()
         self.vision = VisionEngine()
+        self.stability_tracker = VisionStabilityTracker()
         self.vision_worker = VisionWorker(
             self.vision,
             on_result=self._queue_vision_result,
@@ -145,6 +148,7 @@ class DesktopDashboard:
         else:
             self.status_var.set("Idle — observation only")
             self.vision_worker.stop()
+            self.stability_tracker.reset()
 
     def _capture_loop(self) -> None:
         if not self.running:
@@ -188,9 +192,10 @@ class DesktopDashboard:
         self.latest_result = result
         self.vision_var.set(f"Vision: {result.screen_type} ({result.screen_confidence:.0%})  •  Regions: {len(result.regions)}")
         self.ocr_var.set(f"OCR: {len(result.ocr_text)} text items")
-        self._update_battle(result)
+        stable = self.stability_tracker.update(result)
+        self._update_battle(result, stable)
 
-    def _update_battle(self, result: VisionResult) -> None:
+    def _update_battle(self, result: VisionResult, stable=None) -> None:
         battle = result.battle
         if not battle:
             self.battle_var.set("Battle: —")
@@ -214,6 +219,26 @@ class DesktopDashboard:
             details.append(f"Capture: {battle.capture_percent}%")
         if battle.abilities:
             details.append("Abilities: " + ", ".join(battle.abilities))
+
+        # Visual HP analysis is deliberately diagnostic. We do not replace the
+        # numeric OCR result until fixture measurements demonstrate stability.
+        if self.latest_frame is not None:
+            try:
+                bars = estimate_battle_hp_bars(self.latest_frame.to_image())
+                visual_parts = []
+                for side in ("player", "enemy"):
+                    estimate = bars[side]
+                    if estimate.percent is not None:
+                        visual_parts.append(f"{side} bar {estimate.percent}% ({estimate.confidence:.0%})")
+                if visual_parts:
+                    details.append("Visual: " + ", ".join(visual_parts))
+            except Exception as exc:
+                result.diagnostics["hp_bar_error"] = str(exc)
+
+        if stable is not None:
+            details.append(f"Stable: {stable.stable_frames} frames ({stable.confidence:.0%})")
+        else:
+            details.append("Stable: waiting for repeated frames")
         self.battle_var.set("Battle: " + ("  •  ".join(details) if details else "detected"))
 
     def _show_image(self, image: Image.Image, result: VisionResult | None) -> None:
