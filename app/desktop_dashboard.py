@@ -11,11 +11,14 @@ from PIL import Image, ImageDraw, ImageTk
 from .capture import Frame, ScreenCapture
 from .vision.engine import VisionEngine
 from .vision.fixtures import save_frame
+from .vision.models import VisionResult
+from .vision.worker import VisionWorker
 from .window_manager import GameWindow, activate_window, list_windows
 
 
 class DesktopDashboard:
-    REFRESH_MS = 250
+    CAPTURE_MS = 80
+    VISION_INTERVAL_SECONDS = 0.5
     SELF_TITLE = "Miscrits AI Automation — Vision Console"
 
     def __init__(self, root: tk.Tk) -> None:
@@ -25,11 +28,22 @@ class DesktopDashboard:
         self.root.minsize(900, 740)
         self.capture = ScreenCapture()
         self.vision = VisionEngine()
+        self.vision_worker = VisionWorker(
+            self.vision,
+            on_result=self._queue_vision_result,
+            on_error=self._queue_vision_error,
+            interval_seconds=self.VISION_INTERVAL_SECONDS,
+        )
         self.windows: list[GameWindow] = []
         self.selected: GameWindow | None = None
         self.running = False
         self.latest_frame: Frame | None = None
-        self.latest_result = None
+        self.latest_result: VisionResult | None = None
+        self.pending_result: VisionResult | None = None
+        self.pending_error: str | None = None
+        self.capture_count = 0
+        self.capture_window_started = time.perf_counter()
+        self.capture_fps = 0.0
         self.capture_mode = tk.StringVar(value="Window content")
         self.show_regions = tk.BooleanVar(value=True)
         self.fixture_category = tk.StringVar(value="unknown")
@@ -114,6 +128,7 @@ class DesktopDashboard:
         if not self.running:
             self.running = True
             self.toggle_button.configure(text="Stop Capture")
+            self.vision_worker.start()
             self._capture_loop()
         if activate_window(self.selected):
             self.status_var.set(f"Active: {self.selected.title} • capture running")
@@ -123,35 +138,59 @@ class DesktopDashboard:
     def toggle_capture(self) -> None:
         self.running = not self.running
         self.toggle_button.configure(text="Stop Capture" if self.running else "Start Capture")
-        self.status_var.set("Capturing + vision — no game input is being sent" if self.running else "Idle — observation only")
         if self.running:
+            self.status_var.set("Capturing + vision — no game input is being sent")
+            self.vision_worker.start()
             self._capture_loop()
+        else:
+            self.status_var.set("Idle — observation only")
+            self.vision_worker.stop()
 
     def _capture_loop(self) -> None:
         if not self.running:
             return
+        self._apply_pending_vision()
         if self.selected:
-            started = time.perf_counter()
             try:
                 if self.capture_mode.get() == "Window content" and self.selected.hwnd:
                     frame = self.capture.grab_window(self.selected.hwnd)
                 else:
                     frame = self.capture.grab(self.selected.region)
                 self.latest_frame = frame
-                result = self.vision.analyze(frame)
-                self.latest_result = result
-                self._show_image(frame.to_image(), result)
-                elapsed = time.perf_counter() - started
-                fps = 1 / elapsed if elapsed > 0 else 0
-                self.fps_var.set(f"Capture: {fps:.1f} FPS  •  {frame.width}×{frame.height}")
-                self.vision_var.set(f"Vision: {result.screen_type} ({result.screen_confidence:.0%})  •  Regions: {len(result.regions)}")
-                self.ocr_var.set(f"OCR: {len(result.ocr_text)} text items")
-                self._update_battle(result)
+                self.capture_count += 1
+                now = time.perf_counter()
+                elapsed = now - self.capture_window_started
+                if elapsed >= 1.0:
+                    self.capture_fps = self.capture_count / elapsed
+                    self.capture_count = 0
+                    self.capture_window_started = now
+                self.fps_var.set(f"Capture: {self.capture_fps:.1f} FPS  •  {frame.width}×{frame.height}")
+                self.vision_worker.submit(frame)
+                self._show_image(frame.to_image(), self.latest_result)
             except Exception as exc:
-                self.status_var.set(f"Vision/capture error: {exc}")
-        self.root.after(self.REFRESH_MS, self._capture_loop)
+                self.status_var.set(f"Capture error: {exc}")
+        self.root.after(self.CAPTURE_MS, self._capture_loop)
 
-    def _update_battle(self, result) -> None:
+    def _queue_vision_result(self, result: VisionResult) -> None:
+        self.pending_result = result
+
+    def _queue_vision_error(self, exc: Exception) -> None:
+        self.pending_error = str(exc)
+
+    def _apply_pending_vision(self) -> None:
+        if self.pending_error:
+            self.status_var.set(f"Vision error: {self.pending_error}")
+            self.pending_error = None
+        if self.pending_result is None:
+            return
+        result = self.pending_result
+        self.pending_result = None
+        self.latest_result = result
+        self.vision_var.set(f"Vision: {result.screen_type} ({result.screen_confidence:.0%})  •  Regions: {len(result.regions)}")
+        self.ocr_var.set(f"OCR: {len(result.ocr_text)} text items")
+        self._update_battle(result)
+
+    def _update_battle(self, result: VisionResult) -> None:
         battle = result.battle
         if not battle:
             self.battle_var.set("Battle: —")
@@ -177,9 +216,9 @@ class DesktopDashboard:
             details.append("Abilities: " + ", ".join(battle.abilities))
         self.battle_var.set("Battle: " + ("  •  ".join(details) if details else "detected"))
 
-    def _show_image(self, image: Image.Image, result) -> None:
+    def _show_image(self, image: Image.Image, result: VisionResult | None) -> None:
         display = image.copy()
-        if self.show_regions.get() and result.regions:
+        if self.show_regions.get() and result and result.regions:
             draw = ImageDraw.Draw(display)
             for region in result.regions:
                 draw.rectangle((region.left, region.top, region.right, region.bottom), outline="red", width=3)
@@ -204,6 +243,7 @@ class DesktopDashboard:
 
     def close(self) -> None:
         self.running = False
+        self.vision_worker.stop()
         self.capture.close()
         self.root.destroy()
 
