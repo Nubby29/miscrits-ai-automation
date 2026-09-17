@@ -1,16 +1,15 @@
 """Observation-only visual analysis helpers for Miscrits HP bars.
 
-This module deliberately does not interact with the game. It estimates the
-filled fraction of a horizontal HP-bar candidate using pixel color/saturation
-statistics. OCR remains the authoritative numeric source until fixtures prove
-that a visual bar estimate is stable enough to promote.
+The numeric HP text is the authoritative value. The visual analyzer is a
+secondary diagnostic that estimates the filled portion of the small horizontal
+HUD bar and reports low confidence when the crop does not contain a clear bar.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PIL import Image, ImageStat
+from PIL import Image
 
 from .regions import NormalizedRegion
 
@@ -27,45 +26,48 @@ class HPBarEstimate:
     diagnostics: dict[str, float | int | str]
 
 
-# These are intentionally broad candidate strips inside the status panels.
-# They are diagnostic candidates, not a hard-coded assertion about the exact
-# game asset layout. Fixture validation can narrow them later.
-PLAYER_HP_BAR_CANDIDATE = NormalizedRegion("player_hp_bar_candidate", 0.225, 0.085, 0.155, 0.030)
-ENEMY_HP_BAR_CANDIDATE = NormalizedRegion("enemy_hp_bar_candidate", 0.615, 0.085, 0.155, 0.030)
+# Calibrated against the visible Miscrits HUD: these are narrow strips around
+# the actual colored HP bars, rather than the complete status cards.
+PLAYER_HP_BAR_CANDIDATE = NormalizedRegion("player_hp_bar_candidate", 0.285, 0.073, 0.105, 0.026)
+ENEMY_HP_BAR_CANDIDATE = NormalizedRegion("enemy_hp_bar_candidate", 0.675, 0.073, 0.105, 0.026)
+
+
+def _column_activity(crop: Image.Image) -> list[float]:
+    width, height = crop.size
+    scores: list[float] = []
+    for x in range(width):
+        active = 0
+        for y in range(height):
+            r, g, b = crop.getpixel((x, y))
+            maximum = max(r, g, b)
+            minimum = min(r, g, b)
+            saturation = (maximum - minimum) / max(1, maximum)
+            brightness = (r + g + b) / 765.0
+            # Miscrits HP fills are strongly colored. Neutral white text,
+            # borders and the gray panel should not count as fill pixels.
+            if saturation >= 0.28 and brightness >= 0.18:
+                active += 1
+        scores.append(active / max(1, height))
+    return scores
 
 
 def estimate_hp_bar(image: Image.Image, region: NormalizedRegion) -> HPBarEstimate:
-    """Estimate horizontal fill from colored/saturated pixels in a candidate strip."""
+    """Estimate horizontal fill from a calibrated candidate strip."""
     left, top, right, bottom = region.crop_box(image)
     if right <= left or bottom <= top:
         return HPBarEstimate(None, 0.0, 0, 0, 0, {"reason": "invalid_region"})
 
     crop = image.crop((left, top, right, bottom)).convert("RGB")
     width, height = crop.size
-    if width < 8 or height < 3:
+    if width < 12 or height < 3:
         return HPBarEstimate(None, 0.0, width * height, 0, width, {"reason": "small_region"})
 
-    # Downsample vertically so text/outline pixels have less influence while
-    # preserving the horizontal fill boundary.
-    column_scores: list[float] = []
-    for x in range(width):
-        score = 0.0
-        for y in range(height):
-            r, g, b = crop.getpixel((x, y))
-            max_c = max(r, g, b)
-            min_c = min(r, g, b)
-            saturation = (max_c - min_c) / max(1, max_c)
-            # Green/cyan/red UI fills tend to be saturated relative to the
-            # neutral panel background. Brightness keeps dark outlines out.
-            brightness = (r + g + b) / 765.0
-            if saturation >= 0.18 and brightness >= 0.16:
-                score += 1.0
-        column_scores.append(score / height)
+    column_scores = _column_activity(crop)
 
-    # A filled bar normally forms a contiguous run. Use the longest run of
-    # columns whose score exceeds a modest threshold rather than raw pixel
-    # counting, which is sensitive to rounded corners and text.
-    threshold = 0.35
+    # The fill is a contiguous horizontal run. Requiring activity across most
+    # of the bar's vertical thickness avoids mistaking a single text stroke or
+    # decorative pixel for a filled section.
+    threshold = 0.45
     best_run = 0
     run = 0
     for score in column_scores:
@@ -75,13 +77,26 @@ def estimate_hp_bar(image: Image.Image, region: NormalizedRegion) -> HPBarEstima
         else:
             run = 0
 
-    if best_run < max(4, width // 20):
-        return HPBarEstimate(None, 0.0, width * height, 0, width, {"reason": "no_stable_fill", "mean_column_score": round(sum(column_scores) / width, 3)})
+    mean_score = sum(column_scores) / width
+    if best_run < max(5, round(width * 0.08)):
+        return HPBarEstimate(
+            None,
+            0.0,
+            width * height,
+            best_run,
+            width,
+            {"reason": "no_stable_fill", "mean_column_score": round(mean_score, 3)},
+        )
 
     percent = round(best_run / width * 100)
-    mean_score = sum(column_scores) / width
-    continuity = best_run / max(1, width)
-    confidence = min(0.92, max(0.0, 0.35 + continuity * 0.45 + mean_score * 0.20))
+    continuity = best_run / width
+    confidence = min(0.95, max(0.0, 0.30 + continuity * 0.55 + mean_score * 0.15))
+    # Avoid presenting a visually-derived number as reliable when the crop is
+    # mostly background. The dashboard will show it only when confidence is
+    # meaningful; OCR remains authoritative regardless.
+    if confidence < 0.55:
+        percent = None
+
     return HPBarEstimate(
         percent=percent,
         confidence=confidence,
