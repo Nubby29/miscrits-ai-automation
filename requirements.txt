@@ -4,3 +4,4 @@ pydantic-settings>=2.6.0
 Pillow>=11.0.0
 pygetwindow>=0.0.9
 pynput>=1.7.7
+pytesseract>=0.3.13
