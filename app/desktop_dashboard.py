@@ -47,7 +47,6 @@ class DesktopDashboard:
         header.pack(fill="x")
         ttk.Label(header, text="MISCRITS AI AUTOMATION", font=("Segoe UI", 16, "bold")).pack(side="left")
         ttk.Label(header, textvariable=self.status_var).pack(side="right")
-
         controls = ttk.Frame(self.root, padding=(12, 0, 12, 10))
         controls.pack(fill="x")
         ttk.Label(controls, text="Game window:").pack(side="left")
@@ -65,7 +64,6 @@ class DesktopDashboard:
         info.pack(fill="x")
         ttk.Label(info, textvariable=self.title_var).pack(side="left")
         ttk.Label(info, textvariable=self.fps_var).pack(side="right")
-
         self.preview = ttk.Label(self.root, anchor="center", relief="sunken")
         self.preview.pack(fill="both", expand=True, padx=12, pady=(0, 8))
 
