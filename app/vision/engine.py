@@ -58,7 +58,10 @@ class VisionEngine:
         "daily quests": 1.0,
         "clans": 1.0,
     }
-    _ABILITY_NAMES = ("sting", "confuse", "smack", "power up", "swipe", "whip", "fireflight")
+    _ABILITY_NAMES = (
+        "sting", "confuse", "smack", "power up", "swipe", "whip", "fireflight",
+    )
+    _NAME_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' -"
     _IGNORED_NAME_TEXT = {
         "capture", "capture!", "abilities", "items", "your turn", "its your turn",
         "it's your turn", "attack", "skills", "switch", "flee",
@@ -80,9 +83,6 @@ class VisionEngine:
     def analyze(self, frame: Frame) -> VisionResult:
         image = frame.to_image()
         processed = self._preprocess(image)
-
-        # Battle layout is visually distinctive. Use only a tiny OCR probe for
-        # classification; expensive full-frame OCR is reserved for other screens.
         battle_probe = self._battle_probe(processed)
         screen_type, screen_confidence, evidence = self._classify_screen(processed, battle_probe)
 
@@ -96,7 +96,6 @@ class VisionEngine:
         ocr_text = [item.text for item in ocr_items]
         region_defs = BATTLE_REGIONS if screen_type == "battle" else EXPLORATION_REGIONS if screen_type == "exploration" else ()
         regions = [region.detect(processed, screen_confidence or 0.5) for region in region_defs]
-
         return VisionResult(
             frame_id=frame.frame_id,
             timestamp=frame.timestamp,
@@ -171,12 +170,8 @@ class VisionEngine:
             battle_score += 2.5
         battle_score += min(1.5, cls._fuzzy_battle_hits(probe) * 0.5)
         evidence = {"battle": battle_score, "exploration": exploration_score}
-
         if battle_score >= 2.5:
             return "battle", min(0.97, 0.66 + battle_score * 0.055), evidence
-
-        # If the battle visual signal is absent, perform a normal full-frame OCR
-        # classification. This path is deliberately skipped for battle frames.
         return cls._classify_non_battle(image, evidence)
 
     @classmethod
@@ -184,8 +179,7 @@ class VisionEngine:
         if pytesseract is None:
             return "unknown", 0.0, evidence
         try:
-            data: Any = pytesseract.image_to_string(image, config="--psm 11")
-            joined = cls._normalize_text(str(data))
+            joined = cls._normalize_text(pytesseract.image_to_string(image, config="--psm 11"))
         except Exception:
             return "unknown", 0.0, evidence
         exploration_score = sum(weight for token, weight in cls._EXPLORATION_SIGNATURES.items() if token in joined)
@@ -202,18 +196,16 @@ class VisionEngine:
     @classmethod
     def _fuzzy_battle_hits(cls, values: Iterable[OCRItem | str]) -> int:
         hits = 0
-        tokens = tuple(cls._BATTLE_SIGNATURES)
         for value in values:
             text = cls._normalize_text(value.text if isinstance(value, OCRItem) else value)
             if len(text) < 4:
                 continue
-            if any(SequenceMatcher(None, text, token).ratio() >= 0.62 for token in tokens):
+            if any(SequenceMatcher(None, text, token).ratio() >= 0.62 for token in cls._BATTLE_SIGNATURES):
                 hits += 1
         return hits
 
     @staticmethod
     def _battle_layout_signal(image: Image.Image) -> bool:
-        """Detect the bright battle action strip without OCR."""
         gray = image.convert("L")
         width, height = gray.size
         if width < 500 or height < 400:
@@ -228,49 +220,35 @@ class VisionEngine:
     def _battle_probe(self, image: Image.Image) -> list[str]:
         if not self.config.enable_ocr or pytesseract is None:
             return []
-        # The action strip is enough to distinguish battle from most normal UI.
         return self._regional_ocr(image, BATTLE_TURN_REGION, psm=7) + self._regional_ocr(
             image, BATTLE_CAPTURE_TEXT, psm=7, whitelist="Capture!%0123456789 "
         )
 
     def _battle_ocr_items(self, image: Image.Image) -> list[OCRItem]:
-        """Return compact OCR items from the battle text-bearing areas."""
         values: list[OCRItem] = []
         regions = (
-            (BATTLE_PLAYER_NAME, "name"),
-            (BATTLE_PLAYER_HP, "hp"),
-            (BATTLE_ENEMY_NAME, "name"),
-            (BATTLE_ENEMY_HP, "hp"),
-            (BATTLE_CAPTURE_TEXT, "capture"),
-            (BATTLE_TURN_REGION, "turn"),
+            (BATTLE_PLAYER_NAME, "name"), (BATTLE_PLAYER_HP, "hp"),
+            (BATTLE_ENEMY_NAME, "name"), (BATTLE_ENEMY_HP, "hp"),
+            (BATTLE_CAPTURE_TEXT, "capture"), (BATTLE_TURN_REGION, "turn"),
         )
         for region, kind in regions:
             lines = self._regional_ocr(
-                image,
-                region,
-                psm=7 if kind in {"name", "hp", "turn"} else 6,
-                whitelist="0123456789/ " if kind == "hp" else None,
+                image, region, psm=7 if kind in {"name", "hp", "turn"} else 6,
+                whitelist="0123456789/ " if kind == "hp" else self._NAME_WHITELIST if kind == "name" else None,
             )
             left, top, right, bottom = region.crop_box(image)
             for line in lines:
                 values.append(OCRItem(line, 100.0, left, top, max(1, right - left), max(1, bottom - top)))
 
-        action_lines = self._regional_ocr(
-            image,
-            # The existing battle_actions region includes all four buttons.
-            next(region for region in BATTLE_REGIONS if region.name == "battle_actions"),
-            psm=6,
-        )
         action_region = next(region for region in BATTLE_REGIONS if region.name == "battle_actions")
-        left, top, right, bottom = action_region.crop_box(image)
-        for line in action_lines:
+        for line in self._regional_ocr(image, action_region, psm=6):
+            left, top, right, bottom = action_region.crop_box(image)
             values.append(OCRItem(line, 100.0, left, top, max(1, right - left), max(1, bottom - top)))
         return values
 
     def _battle_observation(self, image: Image.Image, items: list[OCRItem]) -> BattleObservation:
-        """Extract battle state from isolated, cached HUD crops."""
-        player_name_values = self._regional_ocr(image, BATTLE_PLAYER_NAME, psm=7)
-        enemy_name_values = self._regional_ocr(image, BATTLE_ENEMY_NAME, psm=7)
+        player_name_values = self._regional_ocr(image, BATTLE_PLAYER_NAME, psm=7, whitelist=self._NAME_WHITELIST)
+        enemy_name_values = self._regional_ocr(image, BATTLE_ENEMY_NAME, psm=7, whitelist=self._NAME_WHITELIST)
         player_hp_values = self._regional_ocr(image, BATTLE_PLAYER_HP, psm=7, whitelist="0123456789/ ")
         enemy_hp_values = self._regional_ocr(image, BATTLE_ENEMY_HP, psm=7, whitelist="0123456789/ ")
         capture_values = self._regional_ocr(image, BATTLE_CAPTURE_TEXT, psm=7, whitelist="Capture!%0123456789 ")
@@ -278,22 +256,10 @@ class VisionEngine:
         action_region = next(region for region in BATTLE_REGIONS if region.name == "battle_actions")
         action_values = self._regional_ocr(image, action_region, psm=6)
 
-        player_name = self._find_name(player_name_values)
-        enemy_name = self._find_name(enemy_name_values)
-        player_hp_text = self._find_hp(player_hp_values)
-        enemy_hp_text = self._find_hp(enemy_hp_values)
-
-        # Use global OCR coordinates only as a fallback for a missed tiny crop.
-        if not player_name:
-            player_name = self._fallback_name(items, left_side=True, image=image)
-        if not enemy_name:
-            enemy_name = self._fallback_name(items, left_side=False, image=image)
-        if not player_hp_text:
-            player_hp_text = self._fallback_hp(items, index=0)
-        if not enemy_hp_text:
-            player_hp_candidates = [self._find_hp([item.text]) for item in items]
-            hp = [value for value in player_hp_candidates if value]
-            enemy_hp_text = hp[1] if len(hp) > 1 else None
+        player_name = self._find_name(player_name_values) or self._fallback_name(items, left_side=True, image=image)
+        enemy_name = self._find_name(enemy_name_values) or self._fallback_name(items, left_side=False, image=image)
+        player_hp_text = self._find_hp(player_hp_values) or self._fallback_hp(items, index=0)
+        enemy_hp_text = self._find_hp(enemy_hp_values) or self._fallback_hp(items, index=1)
 
         joined = self._joined_ocr((*turn_values, *capture_values, *action_values, *items))
         turn = "player" if re.search(r"it'?s\s+your\s+turn|your\s+turn", joined) else None
@@ -317,12 +283,9 @@ class VisionEngine:
             abilities=abilities,
             status_text=status,
             diagnostics={
-                "player_name_ocr": tuple(player_name_values),
-                "enemy_name_ocr": tuple(enemy_name_values),
-                "player_hp_ocr": tuple(player_hp_values),
-                "enemy_hp_ocr": tuple(enemy_hp_values),
-                "capture_ocr": tuple(capture_values),
-                "turn_ocr": tuple(turn_values),
+                "player_name_ocr": tuple(player_name_values), "enemy_name_ocr": tuple(enemy_name_values),
+                "player_hp_ocr": tuple(player_hp_values), "enemy_hp_ocr": tuple(enemy_hp_values),
+                "capture_ocr": tuple(capture_values), "turn_ocr": tuple(turn_values),
                 "action_ocr": tuple(action_values),
                 "ability_regions": tuple(region.name for region in BATTLE_ABILITY_REGIONS),
             },
@@ -337,11 +300,8 @@ class VisionEngine:
         crop = image.crop((left, top, right, bottom)).convert("L")
         scale = max(1, self.config.battle_ocr_scale)
         crop = crop.resize((crop.width * scale, crop.height * scale), Image.Resampling.LANCZOS)
-        crop = ImageEnhance.Contrast(crop).enhance(1.45)
-        crop = ImageEnhance.Sharpness(crop).enhance(1.7)
-        # A light threshold variant makes the outlined HUD text easier to read.
-        if whitelist is not None:
-            crop = crop.point(lambda p: 255 if p >= 150 else 0)
+        crop = ImageEnhance.Contrast(crop).enhance(1.5)
+        crop = ImageEnhance.Sharpness(crop).enhance(1.8)
         digest = hashlib.sha1(crop.tobytes()).hexdigest()
         key = (region.name, digest, psm, whitelist or "")
         cached = self._ocr_cache.get(key)
@@ -401,8 +361,7 @@ class VisionEngine:
     def _looks_like_name(cls, value: str) -> bool:
         if not 3 <= len(value) <= 20 or any(char.isdigit() for char in value):
             return False
-        lowered = value.casefold()
-        return lowered not in cls._IGNORED_NAME_TEXT and any(char.isalpha() for char in value)
+        return value.casefold() not in cls._IGNORED_NAME_TEXT and any(char.isalpha() for char in value)
 
     @classmethod
     def _extract_abilities(cls, values: Iterable[str]) -> tuple[str, ...]:
@@ -412,11 +371,18 @@ class VisionEngine:
             if not text:
                 continue
             for expected in cls._ABILITY_NAMES:
-                if text == expected or SequenceMatcher(None, text, expected).ratio() >= 0.70:
+                # Tesseract may return the complete action row as one line.
+                if expected in text or SequenceMatcher(None, text, expected).ratio() >= 0.70:
                     label = expected.title() if expected != "power up" else "Power Up"
                     if label not in found:
                         found.append(label)
-                    break
+                    continue
+                for word in text.split():
+                    if len(word) >= 4 and SequenceMatcher(None, word, expected).ratio() >= 0.72:
+                        label = expected.title() if expected != "power up" else "Power Up"
+                        if label not in found:
+                            found.append(label)
+                        break
         return tuple(found)
 
     @classmethod
