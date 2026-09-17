@@ -188,19 +188,22 @@ class VisionEngine:
     def _battle_observation(self, image: Image.Image, global_items: list[OCRItem]) -> BattleObservation:
         """Extract battle state using dedicated UI crops with global OCR fallback."""
         region_map = {region.name: region for region in BATTLE_REGIONS}
+
         player_text = self._regional_ocr(image, region_map["player_status"], psm=6)
         enemy_text = self._regional_ocr(image, region_map["enemy_status"], psm=6)
-        player_hp_text = self._find_hp(
-            self._regional_ocr(image, region_map["player_status"], psm=7, whitelist="0123456789/ ")
-        ) or self._find_hp(player_text)
-        enemy_hp_text = self._find_hp(
-            self._regional_ocr(image, region_map["enemy_status"], psm=7, whitelist="0123456789/ ")
-        ) or self._find_hp(enemy_text)
+        player_hp_ocr = self._regional_ocr(
+            image, region_map["player_status"], psm=7, whitelist="0123456789/ "
+        )
+        enemy_hp_ocr = self._regional_ocr(
+            image, region_map["enemy_status"], psm=7, whitelist="0123456789/ "
+        )
         capture_text = self._regional_ocr(
             image, region_map["capture_status"], psm=6, whitelist="Capture!%0123456789 "
         )
         action_text = self._regional_ocr(image, region_map["battle_actions"], psm=6)
 
+        player_hp_text = self._find_hp(player_hp_ocr) or self._find_hp(player_text)
+        enemy_hp_text = self._find_hp(enemy_hp_ocr) or self._find_hp(enemy_text)
         player_name = self._find_name(player_text)
         enemy_name = self._find_name(enemy_text)
 
@@ -223,19 +226,11 @@ class VisionEngine:
         joined = self._joined_ocr(global_items)
         turn = "player" if re.search(r"it'?s\s+your\s+turn|your\s+turn", joined) else None
 
-        capture_joined = self._joined_ocr([
-            OCRItem(text, 100.0, 0, 0, 0, 0) for text in capture_text
-        ])
-        capture = self._parse_percent(capture_joined)
-        if capture is None:
-            capture = self._parse_percent(joined)
+        capture_joined = " ".join(self._normalize_text(text) for text in capture_text)
+        capture = self._parse_percent(capture_joined) or self._parse_percent(joined)
 
-        action_joined = self._joined_ocr([
-            OCRItem(text, 100.0, 0, 0, 0, 0) for text in action_text
-        ])
-        abilities = self._match_abilities(action_joined)
-        if not abilities:
-            abilities = self._match_abilities(joined)
+        action_joined = " ".join(self._normalize_text(text) for text in action_text)
+        abilities = self._match_abilities(action_joined) or self._match_abilities(joined)
 
         player_current, player_max = self._parse_hp(player_hp_text)
         enemy_current, enemy_max = self._parse_hp(enemy_hp_text)
@@ -255,8 +250,8 @@ class VisionEngine:
             diagnostics={
                 "player_status_ocr": tuple(player_text),
                 "enemy_status_ocr": tuple(enemy_text),
-                "player_hp_ocr": tuple(self._regional_ocr(image, region_map["player_status"], psm=7, whitelist="0123456789/ ")),
-                "enemy_hp_ocr": tuple(self._regional_ocr(image, region_map["enemy_status"], psm=7, whitelist="0123456789/ ")),
+                "player_hp_ocr": tuple(player_hp_ocr),
+                "enemy_hp_ocr": tuple(enemy_hp_ocr),
                 "capture_ocr": tuple(capture_text),
                 "action_ocr": tuple(action_text),
             },
