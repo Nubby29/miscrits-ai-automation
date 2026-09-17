@@ -20,13 +20,17 @@ class AutomationState(str, Enum):
 
 
 class Point(BaseModel):
+    # Desktop coordinates may be negative when a monitor is positioned to the
+    # left or above the primary Windows display.
     x: int
     y: int
 
 
 class Region(BaseModel):
-    left: int = Field(ge=0)
-    top: int = Field(ge=0)
+    # Windows virtual-desktop coordinates can be negative on multi-monitor
+    # setups. MSS also accepts these coordinates for screen capture.
+    left: int
+    top: int
     width: int = Field(gt=0)
     height: int = Field(gt=0)
 
