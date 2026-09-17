@@ -44,8 +44,7 @@ class VisionEngine:
 
     @staticmethod
     def _to_image(frame: Frame) -> Image.Image:
-        pixels: Any = frame.pixels
-        return Image.frombytes("RGB", (frame.width, frame.height), pixels.rgb)
+        return frame.to_image()
 
     def _preprocess(self, image: Image.Image) -> Image.Image:
         result = image
@@ -58,7 +57,5 @@ class VisionEngine:
     @staticmethod
     def _classify_screen(image: Image.Image) -> str:
         """Return a conservative screen class until game-specific templates exist."""
-        # This deliberately avoids guessing from arbitrary screenshots.
-        # Game-specific visual signatures will be added after real fixtures are available.
         _ = image
         return "unknown"
