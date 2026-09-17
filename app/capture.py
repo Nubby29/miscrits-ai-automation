@@ -1,11 +1,14 @@
-"""Desktop capture abstraction using MSS."""
+"""Desktop capture abstraction using MSS and native Windows window capture."""
 
 from __future__ import annotations
 
+import ctypes
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from mss import mss
+from PIL import Image
 
 from .core.models import Region
 
@@ -17,6 +20,13 @@ class Frame:
     width: int
     height: int
     pixels: Any
+    image: Image.Image | None = None
+
+    def to_image(self) -> Image.Image:
+        """Return the frame as a PIL image regardless of capture backend."""
+        if self.image is not None:
+            return self.image.copy()
+        return Image.frombytes("RGB", (self.width, self.height), self.pixels.rgb)
 
 
 class ScreenCapture:
@@ -24,9 +34,12 @@ class ScreenCapture:
         self._mss = mss()
         self._frame_id = 0
 
-    def grab(self, region: Region) -> Frame:
-        import time
+    def _next_id(self) -> int:
+        self._frame_id += 1
+        return self._frame_id
 
+    def grab(self, region: Region) -> Frame:
+        """Capture a screen region. This can include overlapping windows."""
         monitor = {
             "left": region.left,
             "top": region.top,
@@ -34,13 +47,108 @@ class ScreenCapture:
             "height": region.height,
         }
         image = self._mss.grab(monitor)
-        self._frame_id += 1
         return Frame(
-            frame_id=self._frame_id,
+            frame_id=self._next_id(),
             timestamp=time.time(),
             width=image.width,
             height=image.height,
             pixels=image,
+        )
+
+    def grab_window(self, hwnd: int) -> Frame:
+        """Capture a native Windows window even when another window covers it.
+
+        PrintWindow is used so the dashboard can remain visible while the target
+        window is being observed. If the target cannot be captured, an exception
+        is raised rather than silently returning unrelated desktop pixels.
+        """
+        if not hwnd:
+            raise ValueError("A valid native window handle is required")
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        rect = ctypes.wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            raise OSError("GetWindowRect failed")
+
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        if width <= 0 or height <= 0:
+            raise OSError("Target window has invalid dimensions")
+
+        hwnd_dc = user32.GetWindowDC(hwnd)
+        if not hwnd_dc:
+            raise OSError("GetWindowDC failed")
+        mem_dc = gdi32.CreateCompatibleDC(hwnd_dc)
+        bitmap = gdi32.CreateCompatibleBitmap(hwnd_dc, width, height)
+        if not mem_dc or not bitmap:
+            if mem_dc:
+                gdi32.DeleteDC(mem_dc)
+            user32.ReleaseDC(hwnd, hwnd_dc)
+            raise OSError("Unable to create compatible bitmap")
+
+        old_bitmap = gdi32.SelectObject(mem_dc, bitmap)
+        try:
+            # PW_RENDERFULLCONTENT asks supported applications to render their
+            # complete current contents into the bitmap.
+            result = user32.PrintWindow(hwnd, mem_dc, 0x00000002)
+            if result != 1:
+                result = user32.PrintWindow(hwnd, mem_dc, 0)
+            if result != 1:
+                raise OSError("PrintWindow failed for target window")
+
+            class BitmapInfoHeader(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", ctypes.wintypes.DWORD),
+                    ("biWidth", ctypes.wintypes.LONG),
+                    ("biHeight", ctypes.wintypes.LONG),
+                    ("biPlanes", ctypes.wintypes.WORD),
+                    ("biBitCount", ctypes.wintypes.WORD),
+                    ("biCompression", ctypes.wintypes.DWORD),
+                    ("biSizeImage", ctypes.wintypes.DWORD),
+                    ("biXPelsPerMeter", ctypes.wintypes.LONG),
+                    ("biYPelsPerMeter", ctypes.wintypes.LONG),
+                    ("biClrUsed", ctypes.wintypes.DWORD),
+                    ("biClrImportant", ctypes.wintypes.DWORD),
+                ]
+
+            class BitmapInfo(ctypes.Structure):
+                _fields_ = [("bmiHeader", BitmapInfoHeader), ("bmiColors", ctypes.wintypes.DWORD * 3)]
+
+            info = BitmapInfo()
+            info.bmiHeader.biSize = ctypes.sizeof(BitmapInfoHeader)
+            info.bmiHeader.biWidth = width
+            info.bmiHeader.biHeight = -height
+            info.bmiHeader.biPlanes = 1
+            info.bmiHeader.biBitCount = 32
+            info.bmiHeader.biCompression = 0
+
+            buffer = (ctypes.c_ubyte * (width * height * 4))()
+            copied = gdi32.GetDIBits(
+                mem_dc,
+                bitmap,
+                0,
+                height,
+                ctypes.byref(buffer),
+                ctypes.byref(info),
+                0,
+            )
+            if copied != height:
+                raise OSError("GetDIBits failed")
+            image = Image.frombuffer("RGBA", (width, height), buffer, "raw", "BGRA", 0, 1).convert("RGB")
+        finally:
+            gdi32.SelectObject(mem_dc, old_bitmap)
+            gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(mem_dc)
+            user32.ReleaseDC(hwnd, hwnd_dc)
+
+        return Frame(
+            frame_id=self._next_id(),
+            timestamp=time.time(),
+            width=width,
+            height=height,
+            pixels=None,
+            image=image,
         )
 
     def close(self) -> None:
