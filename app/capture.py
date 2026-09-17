@@ -24,7 +24,6 @@ class Frame:
     image: Image.Image | None = None
 
     def to_image(self) -> Image.Image:
-        """Return the frame as a PIL image regardless of capture backend."""
         if self.image is not None:
             return self.image.copy()
         return Image.frombytes("RGB", (self.width, self.height), self.pixels.rgb)
@@ -40,7 +39,6 @@ class ScreenCapture:
         return self._frame_id
 
     def grab(self, region: Region) -> Frame:
-        """Capture a screen region. This can include overlapping windows."""
         monitor = {
             "left": region.left,
             "top": region.top,
@@ -48,70 +46,75 @@ class ScreenCapture:
             "height": region.height,
         }
         image = self._mss.grab(monitor)
-        return Frame(
-            frame_id=self._next_id(),
-            timestamp=time.time(),
-            width=image.width,
-            height=image.height,
-            pixels=image,
-        )
+        return Frame(self._next_id(), time.time(), image.width, image.height, image)
 
     def grab_window(self, hwnd: int) -> Frame:
-        """Capture a native Windows window even when another window covers it."""
-        if not hwnd:
-            raise ValueError("A valid native window handle is required")
+        """Capture a native window without depending on what is covering it."""
+        if not isinstance(hwnd, int) or hwnd <= 0:
+            raise ValueError("A valid Windows HWND is required")
 
         user32 = ctypes.windll.user32
         gdi32 = ctypes.windll.gdi32
-        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        hwnd_value = ctypes.c_void_p(hwnd)
+
+        # Do not force HWND through wintypes.HWND. On some Python/Windows
+        # combinations that conversion can overflow even for a valid 64-bit HWND.
+        user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
         user32.GetWindowRect.restype = wintypes.BOOL
-        user32.GetWindowDC.argtypes = [wintypes.HWND]
-        user32.GetWindowDC.restype = wintypes.HDC
-        user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+        user32.GetWindowDC.argtypes = [ctypes.c_void_p]
+        user32.GetWindowDC.restype = ctypes.c_void_p
+        user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         user32.ReleaseDC.restype = ctypes.c_int
-        user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+        user32.PrintWindow.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
         user32.PrintWindow.restype = wintypes.BOOL
 
         rect = wintypes.RECT()
-        if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+        if not user32.GetWindowRect(hwnd_value, ctypes.byref(rect)):
             raise OSError("GetWindowRect failed")
-
         width = rect.right - rect.left
         height = rect.bottom - rect.top
         if width <= 0 or height <= 0:
             raise OSError("Target window has invalid dimensions")
 
-        hwnd_dc = user32.GetWindowDC(wintypes.HWND(hwnd))
+        hwnd_dc = user32.GetWindowDC(hwnd_value)
         if not hwnd_dc:
             raise OSError("GetWindowDC failed")
+        gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+        gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+        gdi32.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        gdi32.CreateCompatibleBitmap.restype = ctypes.c_void_p
+        gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        gdi32.SelectObject.restype = ctypes.c_void_p
+        gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+        gdi32.DeleteObject.restype = wintypes.BOOL
+        gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+        gdi32.DeleteDC.restype = wintypes.BOOL
+
         mem_dc = gdi32.CreateCompatibleDC(hwnd_dc)
         bitmap = gdi32.CreateCompatibleBitmap(hwnd_dc, width, height)
         if not mem_dc or not bitmap:
             if mem_dc:
                 gdi32.DeleteDC(mem_dc)
-            user32.ReleaseDC(wintypes.HWND(hwnd), hwnd_dc)
+            user32.ReleaseDC(hwnd_value, hwnd_dc)
             raise OSError("Unable to create compatible bitmap")
 
         old_bitmap = gdi32.SelectObject(mem_dc, bitmap)
         try:
-            result = user32.PrintWindow(wintypes.HWND(hwnd), mem_dc, 0x00000002)
+            # PW_RENDERFULLCONTENT is supported by modern Windows for many
+            # applications and gives the renderer a chance to paint its content.
+            result = user32.PrintWindow(hwnd_value, mem_dc, 0x00000002)
             if not result:
-                result = user32.PrintWindow(wintypes.HWND(hwnd), mem_dc, 0)
+                result = user32.PrintWindow(hwnd_value, mem_dc, 0)
             if not result:
                 raise OSError("PrintWindow failed for target window")
 
             class BitmapInfoHeader(ctypes.Structure):
                 _fields_ = [
-                    ("biSize", wintypes.DWORD),
-                    ("biWidth", wintypes.LONG),
-                    ("biHeight", wintypes.LONG),
-                    ("biPlanes", wintypes.WORD),
-                    ("biBitCount", wintypes.WORD),
-                    ("biCompression", wintypes.DWORD),
-                    ("biSizeImage", wintypes.DWORD),
-                    ("biXPelsPerMeter", wintypes.LONG),
-                    ("biYPelsPerMeter", wintypes.LONG),
-                    ("biClrUsed", wintypes.DWORD),
+                    ("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
                     ("biClrImportant", wintypes.DWORD),
                 ]
 
@@ -127,7 +130,7 @@ class ScreenCapture:
             info.bmiHeader.biCompression = 0
 
             buffer = (ctypes.c_ubyte * (width * height * 4))()
-            gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT, ctypes.c_void_p, ctypes.POINTER(BitmapInfo), wintypes.UINT]
+            gdi32.GetDIBits.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT, wintypes.UINT, ctypes.c_void_p, ctypes.POINTER(BitmapInfo), wintypes.UINT]
             gdi32.GetDIBits.restype = ctypes.c_int
             copied = gdi32.GetDIBits(mem_dc, bitmap, 0, height, ctypes.byref(buffer), ctypes.byref(info), 0)
             if copied != height:
@@ -137,16 +140,9 @@ class ScreenCapture:
             gdi32.SelectObject(mem_dc, old_bitmap)
             gdi32.DeleteObject(bitmap)
             gdi32.DeleteDC(mem_dc)
-            user32.ReleaseDC(wintypes.HWND(hwnd), hwnd_dc)
+            user32.ReleaseDC(hwnd_value, hwnd_dc)
 
-        return Frame(
-            frame_id=self._next_id(),
-            timestamp=time.time(),
-            width=width,
-            height=height,
-            pixels=None,
-            image=image,
-        )
+        return Frame(self._next_id(), time.time(), width, height, None, image)
 
     def close(self) -> None:
         self._mss.close()
