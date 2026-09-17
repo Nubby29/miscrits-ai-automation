@@ -9,8 +9,6 @@ from .core.input_controller import InputController
 from .core.models import AutomationState, Region
 from .core.state_machine import StateMachine
 
-VERSION = "0.3.0"
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
@@ -20,11 +18,8 @@ def smoke_test() -> None:
     input_controller = InputController()
     machine.register(AutomationState.IDLE, lambda: machine.transition(AutomationState.STARTING))
     machine.register(AutomationState.STARTING, lambda: machine.transition(AutomationState.OBSERVING))
-    machine.register(
-        AutomationState.OBSERVING,
-        lambda: log.info("Observation cycle ready; region=%s", Region(left=0, top=0, width=1280, height=720)),
-    )
-    log.info("Miscrits AI Automation v%s", VERSION)
+    machine.register(AutomationState.OBSERVING, lambda: log.info("Observation cycle ready; region=%s", Region(left=0, top=0, width=1280, height=720)))
+    log.info("Miscrits AI Automation v0.3.0")
     machine.tick(); machine.tick(); machine.tick()
     log.info("Current state: %s", machine.state.value)
     input_controller.emergency_stop()
