@@ -43,9 +43,15 @@ class BattleObservation:
     enemy_name: str | None = None
     player_hp_text: str | None = None
     enemy_hp_text: str | None = None
+    player_hp_current: int | None = None
+    player_hp_max: int | None = None
+    enemy_hp_current: int | None = None
+    enemy_hp_max: int | None = None
     turn: str | None = None
     capture_percent: int | None = None
     abilities: tuple[str, ...] = ()
+    status_text: tuple[str, ...] = ()
+    diagnostics: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
