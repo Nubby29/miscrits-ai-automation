@@ -26,10 +26,10 @@ class HPBarEstimate:
     diagnostics: dict[str, float | int | str]
 
 
-# Calibrated against the visible Miscrits HUD: these are narrow strips around
-# the actual colored HP bars, rather than the complete status cards.
-PLAYER_HP_BAR_CANDIDATE = NormalizedRegion("player_hp_bar_candidate", 0.285, 0.073, 0.105, 0.026)
-ENEMY_HP_BAR_CANDIDATE = NormalizedRegion("enemy_hp_bar_candidate", 0.675, 0.073, 0.105, 0.026)
+# Narrow strips calibrated against the actual colored HP bars in the native
+# 1382x736 Miscrits capture. They intentionally avoid the name/icon and HP text.
+PLAYER_HP_BAR_CANDIDATE = NormalizedRegion("player_hp_bar_candidate", 0.295, 0.074, 0.090, 0.020)
+ENEMY_HP_BAR_CANDIDATE = NormalizedRegion("enemy_hp_bar_candidate", 0.690, 0.074, 0.065, 0.020)
 
 
 def _column_activity(crop: Image.Image) -> list[float]:
@@ -43,9 +43,7 @@ def _column_activity(crop: Image.Image) -> list[float]:
             minimum = min(r, g, b)
             saturation = (maximum - minimum) / max(1, maximum)
             brightness = (r + g + b) / 765.0
-            # Miscrits HP fills are strongly colored. Neutral white text,
-            # borders and the gray panel should not count as fill pixels.
-            if saturation >= 0.28 and brightness >= 0.18:
+            if saturation >= 0.25 and brightness >= 0.16:
                 active += 1
         scores.append(active / max(1, height))
     return scores
@@ -63,11 +61,7 @@ def estimate_hp_bar(image: Image.Image, region: NormalizedRegion) -> HPBarEstima
         return HPBarEstimate(None, 0.0, width * height, 0, width, {"reason": "small_region"})
 
     column_scores = _column_activity(crop)
-
-    # The fill is a contiguous horizontal run. Requiring activity across most
-    # of the bar's vertical thickness avoids mistaking a single text stroke or
-    # decorative pixel for a filled section.
-    threshold = 0.45
+    threshold = 0.40
     best_run = 0
     run = 0
     for score in column_scores:
@@ -79,21 +73,11 @@ def estimate_hp_bar(image: Image.Image, region: NormalizedRegion) -> HPBarEstima
 
     mean_score = sum(column_scores) / width
     if best_run < max(5, round(width * 0.08)):
-        return HPBarEstimate(
-            None,
-            0.0,
-            width * height,
-            best_run,
-            width,
-            {"reason": "no_stable_fill", "mean_column_score": round(mean_score, 3)},
-        )
+        return HPBarEstimate(None, 0.0, width * height, best_run, width, {"reason": "no_stable_fill", "mean_column_score": round(mean_score, 3)})
 
     percent = round(best_run / width * 100)
     continuity = best_run / width
     confidence = min(0.95, max(0.0, 0.30 + continuity * 0.55 + mean_score * 0.15))
-    # Avoid presenting a visually-derived number as reliable when the crop is
-    # mostly background. The dashboard will show it only when confidence is
-    # meaningful; OCR remains authoritative regardless.
     if confidence < 0.55:
         percent = None
 
@@ -103,17 +87,10 @@ def estimate_hp_bar(image: Image.Image, region: NormalizedRegion) -> HPBarEstima
         sample_pixels=width * height,
         active_columns=best_run,
         total_columns=width,
-        diagnostics={
-            "mean_column_score": round(mean_score, 3),
-            "continuity": round(continuity, 3),
-            "candidate": region.name,
-        },
+        diagnostics={"mean_column_score": round(mean_score, 3), "continuity": round(continuity, 3), "candidate": region.name},
     )
 
 
 def estimate_battle_hp_bars(image: Image.Image) -> dict[str, HPBarEstimate]:
     """Return diagnostic visual estimates for both battle HP candidates."""
-    return {
-        "player": estimate_hp_bar(image, PLAYER_HP_BAR_CANDIDATE),
-        "enemy": estimate_hp_bar(image, ENEMY_HP_BAR_CANDIDATE),
-    }
+    return {"player": estimate_hp_bar(image, PLAYER_HP_BAR_CANDIDATE), "enemy": estimate_hp_bar(image, ENEMY_HP_BAR_CANDIDATE)}
