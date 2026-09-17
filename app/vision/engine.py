@@ -36,7 +36,7 @@ class VisionConfig:
     sharpen: bool = True
     enable_ocr: bool = True
     ocr_min_confidence: float = 35.0
-    battle_ocr_scale: int = 5
+    battle_ocr_scale: int = 6
     battle_ocr_cache_size: int = 256
     battle_layout_threshold: float = 0.50
 
@@ -200,12 +200,12 @@ class VisionEngine:
                 texts = self._regional_ocr(image, region, psm=psm, whitelist=whitelist)
                 for text in texts:
                     result.append(self._make_item(image, region, text))
-                # For each semantic region, keep collecting independent OCR
-                # evidence. The parser below chooses valid candidates.
 
-        for region in BATTLE_ABILITY_REGIONS:
+        # OCR each ability button independently. The inner text crop excludes
+        # the circular element icon, which was a frequent source of false OCR.
+        for index, region in enumerate(BATTLE_ABILITY_REGIONS):
             for psm, whitelist in ((7, None), (8, None), (13, None)):
-                for text in self._regional_ocr(image, region, psm=psm, whitelist=whitelist):
+                for text in self._regional_ocr(image, region, psm=psm, whitelist=whitelist, inner=True):
                     result.append(self._make_item(image, region, text))
         return result
 
@@ -227,7 +227,8 @@ class VisionEngine:
         enemy_hp = self._find_hp(enemy_hp_values)
         capture_values = values(BATTLE_CAPTURE_TEXT)
         turn_values = values(BATTLE_TURN_REGION)
-        ability_text = [text for region in BATTLE_ABILITY_REGIONS for text in values(region)]
+        ability_values = [values(region) for region in BATTLE_ABILITY_REGIONS]
+        ability_text = [text for slot in ability_values for text in slot]
 
         player_name = self._best_name(player_names)
         enemy_name = self._best_name(enemy_names)
@@ -236,8 +237,14 @@ class VisionEngine:
         turn_text = self._normalize(" ".join(turn_values))
         all_text = self._normalize(" ".join(i.text for i in items))
         turn = "player" if re.search(r"it'?s\s+your\s+turn|your\s+turn", turn_text + " " + all_text) else None
-        capture = self._parse_percent(" ".join(capture_values)) or self._parse_percent(all_text)
-        abilities = self._extract_abilities(ability_text)
+
+        # Capture is now parsed from its dedicated crop only. Falling back to
+        # every battle OCR token could accidentally interpret an HP value such
+        # as 86/86 as a capture percentage.
+        capture = self._parse_capture_percent(capture_values)
+        ability_slots = tuple(self._best_ability(slot) for slot in ability_values)
+        abilities = tuple(label for label in ability_slots if label is not None)
+
         return BattleObservation(
             player_name=player_name,
             enemy_name=enemy_name,
@@ -250,6 +257,7 @@ class VisionEngine:
             turn=turn,
             capture_percent=capture,
             abilities=abilities,
+            ability_slots=ability_slots,
             status_text=tuple(dict.fromkeys(player_names + enemy_names)),
             diagnostics={
                 "player_name_ocr": tuple(dict.fromkeys(player_names)),
@@ -259,30 +267,39 @@ class VisionEngine:
                 "capture_ocr": tuple(dict.fromkeys(capture_values)),
                 "turn_ocr": tuple(dict.fromkeys(turn_values)),
                 "ability_ocr": tuple(dict.fromkeys(ability_text)),
+                "ability_slots_ocr": tuple(tuple(dict.fromkeys(slot)) for slot in ability_values),
             },
         )
 
-    def _regional_ocr(self, image: Image.Image, region, *, psm: int, whitelist: str | None) -> list[str]:
+    def _regional_ocr(self, image: Image.Image, region, *, psm: int, whitelist: str | None, inner: bool = False) -> list[str]:
         if not self.config.enable_ocr or pytesseract is None:
             return []
         left, top, right, bottom = region.crop_box(image)
+        if inner:
+            # Preserve the right-hand text while trimming the icon/left padding.
+            trim = max(1, round((right - left) * 0.22))
+            left += trim
+            top += max(1, round((bottom - top) * 0.08))
+            bottom -= max(1, round((bottom - top) * 0.08))
         if right <= left or bottom <= top:
             return []
         base = image.crop((left, top, right, bottom)).convert("L")
-        scale = max(3, self.config.battle_ocr_scale)
+        scale = max(4, self.config.battle_ocr_scale)
         enlarged = base.resize((base.width * scale, base.height * scale), Image.Resampling.LANCZOS)
-        contrast = ImageEnhance.Contrast(enlarged).enhance(2.2)
-        sharp = ImageEnhance.Sharpness(contrast).enhance(2.5)
-        threshold = sharp.point(lambda p: 255 if p >= 155 else 0)
-        high_threshold = sharp.point(lambda p: 255 if p >= 185 else 0)
+        contrast = ImageEnhance.Contrast(enlarged).enhance(2.5)
+        sharp = ImageEnhance.Sharpness(contrast).enhance(3.0)
+        threshold = sharp.point(lambda p: 255 if p >= 135 else 0)
+        mid_threshold = sharp.point(lambda p: 255 if p >= 160 else 0)
+        high_threshold = sharp.point(lambda p: 255 if p >= 190 else 0)
         variants = (
             ("sharp", sharp),
             ("threshold", threshold),
+            ("mid_threshold", mid_threshold),
             ("high_threshold", high_threshold),
         )
         found: list[str] = []
         for variant_name, variant in variants:
-            key = (region.name, hashlib.sha1(variant.tobytes()).hexdigest(), psm, whitelist or "", variant_name)
+            key = (region.name + ("_inner" if inner else ""), hashlib.sha1(variant.tobytes()).hexdigest(), psm, whitelist or "", variant_name)
             if key in self._ocr_cache:
                 result = list(self._ocr_cache[key])
             else:
@@ -299,8 +316,6 @@ class VisionEngine:
                     self._ocr_cache.pop(next(iter(self._ocr_cache)))
                 self._ocr_cache[key] = tuple(result)
             found.extend(result)
-            # A single region can produce useful alternatives from different
-            # preprocessing passes; don't stop after the first noisy result.
         return list(dict.fromkeys(found))
 
     @staticmethod
@@ -312,9 +327,6 @@ class VisionEngine:
                 current, maximum = map(int, match.groups())
                 if maximum > 0 and current <= maximum:
                     return f"{current}/{maximum}"
-
-        # Some tiny HUD renders lose the slash entirely. In an HP-only crop,
-        # two plausible numbers are still useful evidence.
         numbers: list[int] = []
         for value in values:
             numbers.extend(int(n) for n in re.findall(r"\d{1,4}", value))
@@ -340,14 +352,29 @@ class VisionEngine:
         if matches:
             value = int(matches[-1])
             return value if value <= 100 else None
-
-        # The percentage sign is often too small for OCR. For the dedicated
-        # capture crop, accept a standalone 1–3 digit value in 0..100.
         numbers = [int(n) for n in re.findall(r"\b\d{1,3}\b", text)]
         for value in reversed(numbers):
             if 0 <= value <= 100:
                 return value
         return None
+
+    @classmethod
+    def _parse_capture_percent(cls, values: list[str]) -> int | None:
+        """Parse capture percentage using only the dedicated capture crop."""
+        normalized = [cls._normalize(value) for value in values]
+        for text in normalized:
+            match = re.search(r"(\d{1,3})\s*%", text)
+            if match:
+                value = int(match.group(1))
+                if 0 <= value <= 100:
+                    return value
+        candidates: list[int] = []
+        for text in normalized:
+            # OCR may lose '%' but retain the number next to Capture.
+            if "capture" in text or "captur" in text:
+                candidates.extend(int(n) for n in re.findall(r"\b\d{1,3}\b", text))
+        candidates = [value for value in candidates if 0 <= value <= 100]
+        return candidates[-1] if candidates else None
 
     @classmethod
     def _best_name(cls, values: list[str]) -> str | None:
@@ -359,8 +386,6 @@ class VisionEngine:
                 candidates.append(cleaned)
         if not candidates:
             return None
-        # Prefer longer alphabetic candidates; tiny OCR fragments such as
-        # "ee" are usually noise compared with a full HUD name.
         return max(candidates, key=lambda text: (sum(c.isalpha() for c in text), len(text)))
 
     @classmethod
@@ -373,22 +398,44 @@ class VisionEngine:
         )
 
     @classmethod
+    def _match_ability(cls, value: str) -> tuple[str | None, float]:
+        text = cls._normalize(value)
+        if not text:
+            return None, 0.0
+        best_name: str | None = None
+        best_score = 0.0
+        for expected in cls._ABILITY_NAMES:
+            score = SequenceMatcher(None, text, expected).ratio()
+            # Compare individual OCR words too; this handles errors such as
+            # "MAtchstlcks" without allowing arbitrary short text to match.
+            for word in text.split():
+                if len(word) >= 4:
+                    score = max(score, SequenceMatcher(None, word, expected).ratio())
+            if expected in text:
+                score = 1.0
+            if expected == "power up" and ("power" in text and "up" in text):
+                score = 1.0
+            if score > best_score:
+                best_name, best_score = expected.title(), score
+        return (best_name, best_score) if best_score >= 0.62 else (None, best_score)
+
+    @classmethod
+    def _best_ability(cls, values: list[str]) -> str | None:
+        best_name: str | None = None
+        best_score = 0.0
+        for value in values:
+            name, score = cls._match_ability(value)
+            if score > best_score:
+                best_name, best_score = name, score
+        return best_name
+
+    @classmethod
     def _extract_abilities(cls, values: list[str]) -> tuple[str, ...]:
         found: list[str] = []
         for value in values:
-            text = cls._normalize(value)
-            words = [word for word in text.split() if word]
-            for expected in cls._ABILITY_NAMES:
-                expected_words = expected.split()
-                if expected in text or SequenceMatcher(None, text, expected).ratio() >= .60:
-                    label = expected.title()
-                    if label not in found:
-                        found.append(label)
-                    continue
-                if any(SequenceMatcher(None, word, expected_word).ratio() >= .66 for word in words for expected_word in expected_words if len(expected_word) >= 4):
-                    label = expected.title()
-                    if label not in found:
-                        found.append(label)
+            name, score = cls._match_ability(value)
+            if name and score >= 0.62 and name not in found:
+                found.append(name)
         return tuple(found)
 
     @staticmethod
