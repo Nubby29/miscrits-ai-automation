@@ -165,6 +165,10 @@ class DesktopDashboard:
             details.append(f"HP: {battle.player_hp_text}")
         if battle.enemy_hp_text:
             details.append(f"Enemy HP: {battle.enemy_hp_text}")
+        if battle.player_hp_current is not None and battle.player_hp_max is not None:
+            details.append(f"Player HP: {battle.player_hp_current}/{battle.player_hp_max}")
+        if battle.enemy_hp_current is not None and battle.enemy_hp_max is not None:
+            details.append(f"Enemy HP: {battle.enemy_hp_current}/{battle.enemy_hp_max}")
         if battle.turn:
             details.append(f"Turn: {battle.turn}")
         if battle.capture_percent is not None:
