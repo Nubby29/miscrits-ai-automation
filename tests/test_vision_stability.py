@@ -35,7 +35,7 @@ class BattleParsingTests(unittest.TestCase):
     def test_capture_parser_prefers_dedicated_capture_text(self) -> None:
         engine = VisionEngine()
         self.assertEqual(engine._parse_capture_percent(["Capture! 33%"]), 33)
-        self.assertEqual(engine._parse_capture_percent(["Capture!", "33"]), 33)
+        self.assertEqual(engine._parse_capture_percent(["Capture 34"]), 34)
         # HP values must never become capture values merely because they are
         # present elsewhere in the battle OCR result.
         self.assertIsNone(engine._parse_capture_percent(["86/86", "51/53"]))
