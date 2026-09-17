@@ -16,6 +16,14 @@ class DetectedRegion:
     height: int
     confidence: float = 1.0
 
+    @property
+    def right(self) -> int:
+        return self.left + self.width
+
+    @property
+    def bottom(self) -> int:
+        return self.top + self.height
+
 
 @dataclass
 class VisionResult:
