@@ -50,6 +50,9 @@ class BattleObservation:
     turn: str | None = None
     capture_percent: int | None = None
     abilities: tuple[str, ...] = ()
+    # One entry per visible ability button. Keeping slot order is important for
+    # later observation/state work, while still remaining input-free.
+    ability_slots: tuple[str | None, ...] = ()
     status_text: tuple[str, ...] = ()
     diagnostics: dict[str, object] = field(default_factory=dict)
 
