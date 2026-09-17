@@ -31,12 +31,14 @@ class PVEController:
         scan_interval: float = 0.35,
         action_cooldown: float = 1.25,
         stable_frames: int = 3,
+        dry_run: bool = False,
     ) -> None:
         self.input = input_controller or InputController()
         self.scan_interval = max(0.15, scan_interval)
         self.action_cooldown = max(0.75, action_cooldown)
         self.vision = VisionEngine()
         self.tracker = VisionStabilityTracker(StabilityConfig(required_frames=max(3, stable_frames)))
+        self.dry_run = dry_run
         self._last_action = 0.0
         self._last_signature: tuple[object, ...] | None = None
 
@@ -47,7 +49,7 @@ class PVEController:
 
     @staticmethod
     def _choose_slot(ability_slots: tuple[str | None, ...]) -> int | None:
-        """Prefer a recognized offensive action and avoid known buff/flee labels."""
+        """Prefer a recognized offensive action and avoid known utility labels."""
         preferred: list[tuple[int, str]] = []
         for index, name in enumerate(ability_slots):
             if name:
@@ -68,10 +70,14 @@ class PVEController:
             raise RuntimeError(f"Could not activate target window: {window.title!r}")
 
         LOG.info("PvE controller attached to %s", window.title)
-        LOG.info("Only visible UI clicks are enabled; Ctrl+C stops the loop")
+        LOG.info("Mode: %s", "DRY RUN (no clicks)" if self.dry_run else "LIVE VISIBLE-UI CLICKS")
+        LOG.info("Press Ctrl+C to stop")
         capture = ScreenCapture()
         try:
-            while self.input.can_dispatch():
+            while True:
+                if not self.dry_run and not self.input.can_dispatch():
+                    break
+
                 # Refresh the bounds so clicks follow a moved/resized game window.
                 refreshed = find_window(title_contains)
                 if refreshed is not None and refreshed.hwnd == window.hwnd:
@@ -125,7 +131,10 @@ class PVEController:
                     battle.enemy_hp_current if battle.enemy_hp_current is not None else "?",
                     battle.enemy_hp_max if battle.enemy_hp_max is not None else "?",
                 )
-                if self.input.dispatch("click", window_region=window.region, x=x, y=y):
+
+                if self.dry_run:
+                    self._last_signature = signature
+                elif self.input.dispatch("click", window_region=window.region, x=x, y=y):
                     self._last_action = time.monotonic()
                     self._last_signature = signature
                 else:
@@ -144,8 +153,8 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-    controller = InputController(enabled=not args.dry_run)
-    PVEController(input_controller=controller).run(args.window)
+    controller = InputController(enabled=True)
+    PVEController(input_controller=controller, dry_run=args.dry_run).run(args.window)
 
 
 if __name__ == "__main__":
