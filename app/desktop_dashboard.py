@@ -21,8 +21,8 @@ class DesktopDashboard:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(self.SELF_TITLE)
-        self.root.geometry("1100x800")
-        self.root.minsize(900, 700)
+        self.root.geometry("1100x860")
+        self.root.minsize(900, 740)
         self.capture = ScreenCapture()
         self.vision = VisionEngine()
         self.windows: list[GameWindow] = []
@@ -38,6 +38,7 @@ class DesktopDashboard:
         self.fps_var = tk.StringVar(value="Capture: —")
         self.vision_var = tk.StringVar(value="Vision: —")
         self.ocr_var = tk.StringVar(value="OCR: —")
+        self.battle_var = tk.StringVar(value="Battle: —")
         self._build_ui()
         self.refresh_windows()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -47,6 +48,7 @@ class DesktopDashboard:
         header.pack(fill="x")
         ttk.Label(header, text="MISCRITS AI AUTOMATION", font=("Segoe UI", 16, "bold")).pack(side="left")
         ttk.Label(header, textvariable=self.status_var).pack(side="right")
+
         controls = ttk.Frame(self.root, padding=(12, 0, 12, 10))
         controls.pack(fill="x")
         ttk.Label(controls, text="Game window:").pack(side="left")
@@ -64,6 +66,7 @@ class DesktopDashboard:
         info.pack(fill="x")
         ttk.Label(info, textvariable=self.title_var).pack(side="left")
         ttk.Label(info, textvariable=self.fps_var).pack(side="right")
+
         self.preview = ttk.Label(self.root, anchor="center", relief="sunken")
         self.preview.pack(fill="both", expand=True, padx=12, pady=(0, 8))
 
@@ -71,6 +74,10 @@ class DesktopDashboard:
         vision_bar.pack(fill="x")
         ttk.Label(vision_bar, textvariable=self.vision_var).pack(side="left")
         ttk.Label(vision_bar, textvariable=self.ocr_var).pack(side="right")
+
+        battle_bar = ttk.Frame(self.root, padding=(12, 2, 12, 4))
+        battle_bar.pack(fill="x")
+        ttk.Label(battle_bar, textvariable=self.battle_var).pack(side="left")
 
         tools = ttk.Frame(self.root, padding=(12, 4, 12, 12))
         tools.pack(fill="x")
@@ -137,11 +144,34 @@ class DesktopDashboard:
                 elapsed = time.perf_counter() - started
                 fps = 1 / elapsed if elapsed > 0 else 0
                 self.fps_var.set(f"Capture: {fps:.1f} FPS  •  {frame.width}×{frame.height}")
-                self.vision_var.set(f"Vision: {result.screen_type}  •  Regions: {len(result.regions)}")
+                self.vision_var.set(f"Vision: {result.screen_type} ({result.screen_confidence:.0%})  •  Regions: {len(result.regions)}")
                 self.ocr_var.set(f"OCR: {len(result.ocr_text)} text items")
+                self._update_battle(result)
             except Exception as exc:
                 self.status_var.set(f"Vision/capture error: {exc}")
         self.root.after(self.REFRESH_MS, self._capture_loop)
+
+    def _update_battle(self, result) -> None:
+        battle = result.battle
+        if not battle:
+            self.battle_var.set("Battle: —")
+            return
+        details = []
+        if battle.player_name:
+            details.append(f"Player: {battle.player_name}")
+        if battle.enemy_name:
+            details.append(f"Enemy: {battle.enemy_name}")
+        if battle.player_hp_text:
+            details.append(f"HP: {battle.player_hp_text}")
+        if battle.enemy_hp_text:
+            details.append(f"Enemy HP: {battle.enemy_hp_text}")
+        if battle.turn:
+            details.append(f"Turn: {battle.turn}")
+        if battle.capture_percent is not None:
+            details.append(f"Capture: {battle.capture_percent}%")
+        if battle.abilities:
+            details.append("Abilities: " + ", ".join(battle.abilities))
+        self.battle_var.set("Battle: " + ("  •  ".join(details) if details else "detected"))
 
     def _show_image(self, image: Image.Image, result) -> None:
         display = image.copy()
