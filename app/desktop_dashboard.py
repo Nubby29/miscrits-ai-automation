@@ -27,6 +27,7 @@ class DesktopDashboard:
         self.windows: list[GameWindow] = []
         self.selected: GameWindow | None = None
         self.running = False
+        self.capture_mode = tk.StringVar(value="Window content")
         self.title_var = tk.StringVar(value="No window selected")
         self.status_var = tk.StringVar(value="Idle — observation only")
         self.fps_var = tk.StringVar(value="Capture: —")
@@ -43,11 +44,14 @@ class DesktopDashboard:
         controls = ttk.Frame(self.root, padding=(12, 0, 12, 10))
         controls.pack(fill="x")
         ttk.Label(controls, text="Game window:").pack(side="left")
-        self.window_combo = ttk.Combobox(controls, state="readonly", width=65)
+        self.window_combo = ttk.Combobox(controls, state="readonly", width=55)
         self.window_combo.pack(side="left", padx=8)
         self.window_combo.bind("<<ComboboxSelected>>", self._select_window)
         ttk.Button(controls, text="Refresh", command=self.refresh_windows).pack(side="left", padx=4)
         ttk.Button(controls, text="Activate", command=self.activate_selected).pack(side="left", padx=4)
+        ttk.Label(controls, text="Capture:").pack(side="left", padx=(12, 4))
+        mode_combo = ttk.Combobox(controls, textvariable=self.capture_mode, state="readonly", width=18, values=("Window content", "Screen region"))
+        mode_combo.pack(side="left")
         self.toggle_button = ttk.Button(controls, text="Start Capture", command=self.toggle_capture)
         self.toggle_button.pack(side="right")
         info = ttk.Frame(self.root, padding=(12, 0, 12, 8))
@@ -67,7 +71,6 @@ class DesktopDashboard:
         self.windows = [w for w in all_windows if w.title != self.SELF_TITLE]
         labels = [f"{w.title}  [{w.region.width}×{w.region.height}]" for w in self.windows]
         self.window_combo["values"] = labels
-
         if labels:
             index = next((i for i, w in enumerate(self.windows) if w.title == previous_title), 0)
             self.window_combo.current(index)
@@ -86,9 +89,19 @@ class DesktopDashboard:
             self.title_var.set(self.selected.title)
 
     def activate_selected(self) -> None:
-        if self.selected and activate_window(self.selected):
-            self.status_var.set(f"Active: {self.selected.title}")
-        elif self.selected:
+        if not self.selected:
+            return
+        # Starting first keeps the observation loop alive while the target is
+        # brought forward. Native window capture then remains valid if the
+        # dashboard is later placed over the target.
+        if not self.running:
+            self.running = True
+            self.toggle_button.configure(text="Stop Capture")
+            self.status_var.set("Capturing + vision — no game input is being sent")
+            self._capture_loop()
+        if activate_window(self.selected):
+            self.status_var.set(f"Active: {self.selected.title} • capture running")
+        else:
             self.status_var.set("Could not activate selected window")
 
     def toggle_capture(self) -> None:
@@ -104,8 +117,11 @@ class DesktopDashboard:
         if self.selected:
             started = time.perf_counter()
             try:
-                frame = self.capture.grab(self.selected.region)
-                image = Image.frombytes("RGB", (frame.width, frame.height), frame.pixels.rgb)
+                if self.capture_mode.get() == "Window content" and self.selected.hwnd:
+                    frame = self.capture.grab_window(self.selected.hwnd)
+                else:
+                    frame = self.capture.grab(self.selected.region)
+                image = frame.to_image()
                 self._show_image(image)
                 result = self.vision.analyze(frame)
                 elapsed = time.perf_counter() - started
