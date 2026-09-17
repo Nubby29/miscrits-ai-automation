@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class DetectedRegion:
-    """A named rectangle detected in the captured frame."""
+    """A named rectangle detected or defined in the captured frame."""
 
     name: str
     left: int
@@ -25,9 +25,32 @@ class DetectedRegion:
         return self.top + self.height
 
 
+@dataclass(frozen=True)
+class OCRItem:
+    text: str
+    confidence: float
+    left: int
+    top: int
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class BattleObservation:
+    """Best-effort visual observations from a battle screen."""
+
+    player_name: str | None = None
+    enemy_name: str | None = None
+    player_hp_text: str | None = None
+    enemy_hp_text: str | None = None
+    turn: str | None = None
+    capture_percent: int | None = None
+    abilities: tuple[str, ...] = ()
+
+
 @dataclass
 class VisionResult:
-    """Frame analysis result, intentionally independent from game actions."""
+    """Frame analysis result, independent from game actions."""
 
     frame_id: int
     timestamp: float
@@ -35,5 +58,8 @@ class VisionResult:
     height: int
     regions: list[DetectedRegion] = field(default_factory=list)
     ocr_text: list[str] = field(default_factory=list)
+    ocr_items: list[OCRItem] = field(default_factory=list)
     screen_type: str = "unknown"
+    screen_confidence: float = 0.0
+    battle: BattleObservation | None = None
     diagnostics: dict[str, object] = field(default_factory=dict)
